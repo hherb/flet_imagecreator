@@ -45,6 +45,7 @@ class QwenImageGenerator:
         if progress_callback:
             progress_callback("Model loaded successfully!")
     
+    
     def generate_image(self, prompt, negative_prompt="", width=1664, height=928, 
                       num_inference_steps=50, cfg_scale=4.0, seed=42):
         if not self.model_loaded:
@@ -77,6 +78,9 @@ def main(page: ft.Page):
     page.window_height = 800
     
     generator = QwenImageGenerator()
+    
+    # State for collapsible left panel
+    left_panel_collapsed = False
     
     # UI Components
     prompt_field = ft.TextField(
@@ -144,17 +148,16 @@ def main(page: ft.Page):
     
     # Status and progress
     status_text = ft.Text("Ready to generate images", size=14)
-    progress_bar = ft.ProgressBar(visible=False)
     
-    # Image display
+    # Image display - scrollable container for original size images
     image_container = ft.Container(
         content=ft.Text("Generated image will appear here", text_align=ft.TextAlign.CENTER),
-        width=512,
-        height=512,
         border=ft.border.all(1, ft.Colors.GREY_400),
         alignment=ft.alignment.center,
-        border_radius=8
+        border_radius=8,
+        expand=True
     )
+    
     
     # Buttons
     load_model_btn = ft.ElevatedButton(
@@ -179,13 +182,69 @@ def main(page: ft.Page):
     
     current_image = None
     
+    # Left panel container that will be toggled
+    left_panel_container = ft.Container(
+        content=ft.Column([
+            ft.Text("Generation Parameters", size=18, weight=ft.FontWeight.BOLD),
+            prompt_field,
+            negative_prompt_field,
+            
+            ft.Row([
+                aspect_dropdown,
+                ft.Column([
+                    ft.Text("Inference Steps"),
+                    steps_slider
+                ]),
+                ft.Column([
+                    ft.Text("CFG Scale"),
+                    cfg_slider
+                ])
+            ]),
+            
+            ft.Row([
+                seed_field,
+                random_seed_btn,
+                load_model_btn,
+                generate_btn,
+                save_btn
+            ]),
+            
+            status_text
+        ]),
+        width=450,  # Made wider to accommodate all UI items
+        padding=20,
+        visible=True
+    )
+    
+    # Toggle button for collapsing/expanding the left panel
+    def toggle_left_panel(_):
+        nonlocal left_panel_collapsed
+        left_panel_collapsed = not left_panel_collapsed
+        left_panel_container.visible = not left_panel_collapsed
+        
+        # Update button icon
+        if left_panel_collapsed:
+            toggle_btn.icon = ft.Icons.MENU_OPEN
+            toggle_btn.tooltip = "Show panel"
+        else:
+            toggle_btn.icon = ft.Icons.MENU
+            toggle_btn.tooltip = "Hide panel"
+        
+        page.update()
+    
+    toggle_btn = ft.IconButton(
+        icon=ft.Icons.MENU,
+        tooltip="Hide panel",
+        on_click=toggle_left_panel,
+        icon_size=20
+    )
+    
     def update_status(message):
         status_text.value = message
         page.update()
     
     def load_model_thread():
         try:
-            progress_bar.visible = True
             load_model_btn.disabled = True
             page.update()
             
@@ -194,69 +253,75 @@ def main(page: ft.Page):
             load_model_btn.text = "Model Loaded"
             load_model_btn.icon = ft.Icons.CHECK
             generate_btn.disabled = False
-            progress_bar.visible = False
             update_status("Model loaded successfully! Ready to generate images.")
             
         except Exception as e:
             update_status(f"Error loading model: {str(e)}")
             load_model_btn.disabled = False
-            progress_bar.visible = False
         
         page.update()
     
     def generate_image_thread():
         nonlocal current_image
         try:
-            progress_bar.visible = True
+            print("Generate button clicked - starting thread")
             generate_btn.disabled = True
             save_btn.disabled = True
             page.update()
             
             update_status("Generating image...")
+            print("Status updated to 'Generating image...'")
             
             width, height = aspect_ratios[aspect_dropdown.value]
             seed = int(seed_field.value) if seed_field.value.isdigit() else 42
+            total_steps = int(steps_slider.value)
+            print(f"Parameters: {width}x{height}, steps={total_steps}, seed={seed}")
+            
             
             image = generator.generate_image(
                 prompt=prompt_field.value,
                 negative_prompt=negative_prompt_field.value,
                 width=width,
                 height=height,
-                num_inference_steps=int(steps_slider.value),
+                num_inference_steps=total_steps,
                 cfg_scale=cfg_slider.value,
                 seed=seed
             )
             
             current_image = image
             
-            # Convert image to base64 for display
+            # Convert image to base64 for display at original size
             img_buffer = io.BytesIO()
-            # Resize for display if too large
-            display_image = image.copy()
-            display_image.thumbnail((512, 512), Image.Resampling.LANCZOS)
-            display_image.save(img_buffer, format='PNG')
+            image.save(img_buffer, format='PNG')
             img_base64 = base64.b64encode(img_buffer.getvalue()).decode()
             
-            image_container.content = ft.Image(
-                src_base64=img_base64,
-                width=512,
-                height=512,
-                fit=ft.ImageFit.CONTAIN
+            # Create scrollable container with original size image
+            scroll_view = ft.ListView(
+                controls=[
+                    ft.Image(
+                        src_base64=img_base64,
+                        width=image.width,
+                        height=image.height,
+                        fit=ft.ImageFit.NONE
+                    )
+                ],
+                expand=True,
+                auto_scroll=False
             )
+            
+            image_container.content = scroll_view
             
             generate_btn.disabled = False
             save_btn.disabled = False
-            progress_bar.visible = False
             update_status("Image generated successfully!")
             
         except Exception as e:
             update_status(f"Error generating image: {str(e)}")
             generate_btn.disabled = False
-            progress_bar.visible = False
         
         page.update()
     
-    def save_image(e):
+    def save_image(_):
         if current_image:
             # Create filename with timestamp
             import datetime
@@ -266,61 +331,37 @@ def main(page: ft.Page):
             current_image.save(filename)
             update_status(f"Image saved as {filename}")
     
+    def on_generate_click(_):
+        print("Generate button clicked!")
+        threading.Thread(target=generate_image_thread, daemon=True).start()
+    
     load_model_btn.on_click = lambda _: threading.Thread(target=load_model_thread, daemon=True).start()
-    generate_btn.on_click = lambda _: threading.Thread(target=generate_image_thread, daemon=True).start()
+    generate_btn.on_click = on_generate_click
     save_btn.on_click = save_image
     
     # Layout
     page.add(
         ft.Container(
             content=ft.Column([
-                ft.Text("Qwen Image Generator", size=24, weight=ft.FontWeight.BOLD),
-                
+                # Header with toggle button
                 ft.Row([
-                    ft.Container(
-                        content=ft.Column([
-                            ft.Text("Generation Parameters", size=18, weight=ft.FontWeight.BOLD),
-                            prompt_field,
-                            negative_prompt_field,
-                            
-                            ft.Row([
-                                aspect_dropdown,
-                                ft.Column([
-                                    ft.Text("Inference Steps"),
-                                    steps_slider
-                                ]),
-                                ft.Column([
-                                    ft.Text("CFG Scale"),
-                                    cfg_slider
-                                ])
-                            ]),
-                            
-                            ft.Row([
-                                seed_field,
-                                random_seed_btn,
-                                load_model_btn,
-                                generate_btn,
-                                save_btn
-                            ]),
-                            
-                            ft.Column([
-                                status_text,
-                                progress_bar
-                            ])
-                        ]),
-                        width=650,
-                        padding=20
-                    ),
+                    toggle_btn,
+                    ft.Text("Qwen Image Generator", size=24, weight=ft.FontWeight.BOLD),
+                ], alignment=ft.MainAxisAlignment.START, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                
+                # Main content row
+                ft.Row([
+                    left_panel_container,
                     
                     ft.Container(
                         content=ft.Column([
                             ft.Text("Generated Image", size=18, weight=ft.FontWeight.BOLD),
                             image_container
                         ]),
-                        width=550,
+                        expand=True,
                         padding=20
                     )
-                ])
+                ], expand=True)
             ]),
             padding=20
         )
