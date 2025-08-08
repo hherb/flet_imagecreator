@@ -304,7 +304,10 @@ def main(page: ft.Page):
     page.window_width = 1200
     page.window_height = 800
     
+    # Initialize components using new architecture
     generator = QwenImageGenerator()
+    ui_updater = UIUpdater(page)
+    orchestrator = ImageGenerationOrchestrator(ui_updater)
     
     # State for collapsible left panel
     left_panel_collapsed = False
@@ -432,7 +435,6 @@ def main(page: ft.Page):
         width=120
     )
     
-    current_image = None
     
     # Left panel container that will be toggled
     left_panel_container = ft.Container(
@@ -498,138 +500,86 @@ def main(page: ft.Page):
         icon_size=20
     )
     
-    def update_status(message):
-        status_text.value = message
-        page.update()
     
     def load_model_thread():
         try:
             load_model_btn.disabled = True
             page.update()
             
-            generator.load_model(progress_callback=update_status)
+            def progress_callback(message):
+                ui_updater.update_status(message, status_text)
+            
+            generator.load_model(progress_callback=progress_callback)
             
             load_model_btn.text = "Model Loaded"
             load_model_btn.icon = ft.Icons.CHECK
             generate_btn.disabled = False
-            update_status("Model loaded successfully! Ready to generate images.")
+            ui_updater.update_status("Model loaded successfully! Ready to generate images.", status_text)
             
         except Exception as e:
-            update_status(f"Error loading model: {str(e)}")
+            ui_updater.update_status(f"Error loading model: {str(e)}", status_text)
             load_model_btn.disabled = False
         
         page.update()
     
     def generate_image_thread():
-        nonlocal current_image
         try:
             print("Generate button clicked - starting thread")
             generate_btn.disabled = True
             save_btn.disabled = True
             
-            # Show progress components
-            progress_bar.visible = True
-            progress_text.visible = True
-            preview_container.visible = True
-            progress_title.visible = True
-            page.update()
+            # Show progress components using UI updater
+            progress_components = {
+                "bar": progress_bar,
+                "text": progress_text, 
+                "preview": preview_container,
+                "title": progress_title
+            }
+            ui_updater.show_progress_components(progress_components)
+            ui_updater.update_status("Generating image...", status_text)
             
-            update_status("Generating image...")
-            print("Status updated to 'Generating image...'")
+            # Extract UI parameters using pure function
+            ui_params = {
+                "prompt": prompt_field.value,
+                "negative_prompt": negative_prompt_field.value,
+                "aspect_ratio": aspect_dropdown.value,
+                "seed": seed_field.value,
+                "steps": steps_slider.value,
+                "cfg_scale": cfg_slider.value
+            }
+            params = validate_generation_params(ui_params)
+            print(f"Parameters: {params.width}x{params.height}, steps={params.num_inference_steps}, seed={params.seed}")
             
-            width, height = aspect_ratios[aspect_dropdown.value or "16:9 (Widescreen)"]
-            seed = int(seed_field.value) if seed_field.value and seed_field.value.isdigit() else 42
-            total_steps = int(steps_slider.value)
-            print(f"Parameters: {width}x{height}, steps={total_steps}, seed={seed}")
+            # Progress callback function using pure functions
+            def on_progress(progress_data):
+                ui_updater.update_progress(progress_data, progress_components)
             
-            # Progress callback function
-            def on_progress(current_step, total_steps, preview_image):
-                print(f"UI Progress callback: {current_step}/{total_steps}")
-                
-                # Update progress bar
-                progress_bar.value = current_step / total_steps
-                progress_text.value = f"Step {current_step} / {total_steps}"
-                
-                # Update preview container with progress message since Qwen doesn't support preview images
-                preview_container.content = ft.Column([
-                    ft.Icon(ft.Icons.HOURGLASS_EMPTY, size=40, color=ft.Colors.BLUE_400),
-                    ft.Text(f"Generating step {current_step}/{total_steps}", 
-                           text_align=ft.TextAlign.CENTER, size=12),
-                    ft.Text("Preview not available for Qwen model", 
-                           text_align=ft.TextAlign.CENTER, size=10, color=ft.Colors.GREY_600)
-                ], horizontal_alignment=ft.CrossAxisAlignment.CENTER)
-                
-                try:
-                    page.update()
-                    print("Page updated successfully")
-                except Exception as e:
-                    print(f"Error updating page: {e}")
+            # Generate image using orchestrator
+            image = generator.generate_image(params, progress_callback=on_progress)
+            orchestrator.current_image = image
             
-            image = generator.generate_image(
-                prompt=prompt_field.value or "",
-                negative_prompt=negative_prompt_field.value or "",
-                width=width,
-                height=height,
-                num_inference_steps=total_steps,
-                cfg_scale=cfg_slider.value,
-                seed=seed,
-                progress_callback=on_progress
-            )
+            # Convert and display image using pure functions and UI updater
+            image_base64 = convert_image_to_base64(image)
+            ui_updater.update_image_display(image_base64, image_container)
             
-            current_image = image
-            
-            # Convert image to base64 for display at original size
-            img_buffer = io.BytesIO()
-            image.save(img_buffer, format='PNG')
-            img_base64 = base64.b64encode(img_buffer.getvalue()).decode()
-            
-            # Create contained image display that fits within the UI
-            image_display = ft.Container(
-                content=ft.Image(
-                    src_base64=img_base64,
-                    fit=ft.ImageFit.CONTAIN,  # Fit image within container while maintaining aspect ratio
-                    expand=True
-                ),
-                expand=True,
-                alignment=ft.alignment.center,
-                bgcolor=ft.Colors.BLACK12,
-                border_radius=8,
-                clip_behavior=ft.ClipBehavior.HARD_EDGE
-            )
-            
-            image_container.content = image_display
-            
-            # Hide progress components after completion
-            progress_bar.visible = False
-            progress_text.visible = False
-            preview_container.visible = False
-            progress_title.visible = False
-            
+            # Hide progress and re-enable controls
+            ui_updater.hide_progress_components(progress_components)
             generate_btn.disabled = False
             save_btn.disabled = False
-            update_status("Image generated successfully!")
+            ui_updater.update_status("Image generated successfully!", status_text)
             
         except Exception as e:
-            update_status(f"Error generating image: {str(e)}")
+            ui_updater.update_status(f"Error generating image: {str(e)}", status_text)
             generate_btn.disabled = False
-            
-            # Hide progress components on error too
-            progress_bar.visible = False
-            progress_text.visible = False
-            preview_container.visible = False
-            progress_title.visible = False
-        
-        page.update()
+            ui_updater.hide_progress_components(progress_components)
+            page.update()
     
     def save_image(_):
-        if current_image:
-            # Create filename with timestamp
-            import datetime
-            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"qwen_generated_{timestamp}.png"
-            
-            current_image.save(filename)
-            update_status(f"Image saved as {filename}")
+        filename = orchestrator.save_current_image()
+        if filename:
+            ui_updater.update_status(f"Image saved as {filename}", status_text)
+        else:
+            ui_updater.update_status("No image to save", status_text)
     
     def on_generate_click(_):
         print("Generate button clicked!")
