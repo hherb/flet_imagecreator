@@ -6,10 +6,229 @@ import base64
 from PIL import Image
 import threading
 import os
+from typing import Dict, Tuple, Optional, Any
+from dataclasses import dataclass
+import datetime
 
 MODEL_NAME = "Qwen/Qwen-Image"
 
+# =============================================================================
+# PURE FUNCTIONS - Business Logic Layer
+# =============================================================================
+
+@dataclass
+class GenerationParams:
+    prompt: str
+    negative_prompt: str
+    width: int
+    height: int
+    num_inference_steps: int
+    cfg_scale: float
+    seed: int
+
+@dataclass
+class ModelConfig:
+    device: str
+    torch_dtype: torch.dtype
+    model_loaded: bool
+
+def get_optimal_device() -> Tuple[str, torch.dtype]:
+    """Pure function to determine optimal device and dtype"""
+    if torch.backends.mps.is_available():
+        return "mps", torch.bfloat16
+    elif torch.cuda.is_available():
+        return "cuda", torch.bfloat16
+    else:
+        return "cpu", torch.float32
+
+def validate_generation_params(params: Dict[str, Any]) -> GenerationParams:
+    """Pure function to validate and create generation parameters"""
+    aspect_ratios = {
+        "1:1 (Square)": (1328, 1328),
+        "16:9 (Widescreen)": (1664, 928),
+        "9:16 (Portrait)": (928, 1664),
+        "4:3 (Standard)": (1472, 1140),
+        "3:4 (Portrait Standard)": (1140, 1472)
+    }
+    
+    width, height = aspect_ratios.get(params.get("aspect_ratio"), (1664, 928))
+    seed = int(params.get("seed", 42)) if str(params.get("seed", "")).isdigit() else 42
+    
+    return GenerationParams(
+        prompt=params.get("prompt", ""),
+        negative_prompt=params.get("negative_prompt", ""),
+        width=width,
+        height=height,
+        num_inference_steps=int(params.get("steps", 50)),
+        cfg_scale=float(params.get("cfg_scale", 4.0)),
+        seed=seed
+    )
+
+def enhance_prompt(prompt: str) -> str:
+    """Pure function to enhance prompt with quality modifiers"""
+    positive_magic = "Ultra HD, 4K, cinematic composition."
+    return f"{prompt} {positive_magic}"
+
+def calculate_progress(current_step: int, total_steps: int) -> float:
+    """Pure function to calculate progress percentage"""
+    return current_step / total_steps
+
+def create_progress_message(current_step: int, total_steps: int) -> str:
+    """Pure function to create progress text"""
+    return f"Step {current_step} / {total_steps}"
+
+def generate_filename() -> str:
+    """Pure function to generate timestamped filename"""
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    return f"qwen_generated_{timestamp}.png"
+
+def convert_image_to_base64(image: Image.Image) -> str:
+    """Pure function to convert PIL image to base64 string"""
+    img_buffer = io.BytesIO()
+    image.save(img_buffer, format='PNG')
+    return base64.b64encode(img_buffer.getvalue()).decode()
+
+def create_progress_display_data(current_step: int, total_steps: int) -> Dict[str, Any]:
+    """Pure function to create progress display data"""
+    return {
+        "progress_value": calculate_progress(current_step, total_steps),
+        "progress_text": create_progress_message(current_step, total_steps),
+        "icon": ft.Icons.HOURGLASS_EMPTY,
+        "message": f"Generating step {current_step}/{total_steps}",
+        "sub_message": "Preview not available for Qwen model"
+    }
+
+# =============================================================================
+# SIDE EFFECTS - I/O Operations Layer
+# =============================================================================
+
+class ModelLoader:
+    """Handles model loading side effects"""
+    
+    @staticmethod
+    def load_diffusion_pipeline(model_name: str, config: ModelConfig) -> DiffusionPipeline:
+        """Load and configure the diffusion pipeline"""
+        pipe = DiffusionPipeline.from_pretrained(model_name, torch_dtype=config.torch_dtype)
+        return pipe.to(config.device)
+    
+    @staticmethod
+    def create_generator(device: str, seed: int) -> torch.Generator:
+        """Create torch generator with seed"""
+        return torch.Generator(device=device).manual_seed(seed)
+
+class ImageSaver:
+    """Handles image saving side effects"""
+    
+    @staticmethod
+    def save_image(image: Image.Image, filename: str) -> None:
+        """Save PIL image to file"""
+        image.save(filename)
+
+class UIUpdater:
+    """Handles UI update side effects"""
+    
+    def __init__(self, page: ft.Page):
+        self.page = page
+    
+    def update_status(self, message: str, status_component) -> None:
+        """Update status text and refresh UI"""
+        status_component.value = message
+        self.page.update()
+    
+    def update_progress(self, progress_data: Dict[str, Any], progress_components: Dict[str, Any]) -> None:
+        """Update progress components and refresh UI"""
+        progress_components["bar"].value = progress_data["progress_value"]
+        progress_components["text"].value = progress_data["progress_text"]
+        
+        progress_components["preview"].content = ft.Column([
+            ft.Icon(progress_data["icon"], size=40, color=ft.Colors.BLUE_400),
+            ft.Text(progress_data["message"], text_align=ft.TextAlign.CENTER, size=12),
+            ft.Text(progress_data["sub_message"], text_align=ft.TextAlign.CENTER, size=10, color=ft.Colors.GREY_600)
+        ], horizontal_alignment=ft.CrossAxisAlignment.CENTER)
+        
+        self.page.update()
+    
+    def show_progress_components(self, components: Dict[str, Any]) -> None:
+        """Show progress components"""
+        for comp in components.values():
+            comp.visible = True
+        self.page.update()
+    
+    def hide_progress_components(self, components: Dict[str, Any]) -> None:
+        """Hide progress components"""
+        for comp in components.values():
+            comp.visible = False
+        self.page.update()
+    
+    def update_image_display(self, image_base64: str, image_container) -> None:
+        """Update image display with new image"""
+        image_display = ft.Container(
+            content=ft.Image(
+                src_base64=image_base64,
+                fit=ft.ImageFit.CONTAIN,
+                expand=True
+            ),
+            expand=True,
+            alignment=ft.alignment.center,
+            bgcolor=ft.Colors.BLACK12,
+            border_radius=8,
+            clip_behavior=ft.ClipBehavior.HARD_EDGE
+        )
+        image_container.content = image_display
+        self.page.update()
+
+# =============================================================================
+# ORCHESTRATION LAYER - Coordinates Logic and Side Effects
+# =============================================================================
+
+class ImageGenerationOrchestrator:
+    """Orchestrates the image generation process"""
+    
+    def __init__(self, ui_updater: UIUpdater):
+        self.ui_updater = ui_updater
+        self.current_image = None
+    
+    def generate_image_workflow(self, generator, params: GenerationParams, 
+                               progress_callback=None) -> Image.Image:
+        """Orchestrate the complete image generation workflow"""
+        
+        # Create progress callback for pipeline
+        def step_callback(pipe, step_index, timestep, callback_kwargs):
+            if progress_callback:
+                progress_data = create_progress_display_data(step_index + 1, params.num_inference_steps)
+                progress_callback(progress_data)
+            return callback_kwargs
+        
+        # Generate image with enhanced prompt
+        enhanced_prompt = enhance_prompt(params.prompt)
+        torch_generator = ModelLoader.create_generator(generator.device, params.seed)
+        
+        image = generator.pipe(
+            prompt=enhanced_prompt,
+            negative_prompt=params.negative_prompt,
+            width=params.width,
+            height=params.height,
+            num_inference_steps=params.num_inference_steps,
+            true_cfg_scale=params.cfg_scale,
+            generator=torch_generator,
+            callback_on_step_end=step_callback if progress_callback else None,
+            callback_on_step_end_tensor_inputs=["latents"] if progress_callback else None
+        ).images[0]
+        
+        self.current_image = image
+        return image
+    
+    def save_current_image(self) -> Optional[str]:
+        """Save the current image and return filename"""
+        if self.current_image:
+            filename = generate_filename()
+            ImageSaver.save_image(self.current_image, filename)
+            return filename
+        return None
+
 class QwenImageGenerator:
+    """Simplified generator class using new architecture"""
+    
     def __init__(self):
         self.pipe = None
         self.device = None
@@ -17,57 +236,65 @@ class QwenImageGenerator:
         self.model_loaded = False
         
     def load_model(self, progress_callback=None):
+        """Load the model using pure functions and side effects separation"""
         if self.model_loaded:
             return
             
-        model_name = MODEL_NAME
-        
-        # Device detection for Apple Silicon
-        if torch.backends.mps.is_available():
-            self.torch_dtype = torch.bfloat16
-            self.device = "mps"
-        elif torch.cuda.is_available():
-            self.torch_dtype = torch.bfloat16
-            self.device = "cuda"
-        else:
-            self.torch_dtype = torch.float32
-            self.device = "cpu"
+        # Use pure function to determine device config
+        self.device, self.torch_dtype = get_optimal_device()
         
         if progress_callback:
             progress_callback(f"Using device: {self.device} with dtype: {self.torch_dtype}")
             progress_callback("Loading model...")
         
-        # Load the pipeline
-        self.pipe = DiffusionPipeline.from_pretrained(model_name, torch_dtype=self.torch_dtype)
-        self.pipe = self.pipe.to(self.device)
+        # Use side effect class to load pipeline
+        config = ModelConfig(self.device, self.torch_dtype, False)
+        self.pipe = ModelLoader.load_diffusion_pipeline(MODEL_NAME, config)
         
         self.model_loaded = True
         if progress_callback:
             progress_callback("Model loaded successfully!")
     
-    
-    def generate_image(self, prompt, negative_prompt="", width=1664, height=928, 
-                      num_inference_steps=50, cfg_scale=4.0, seed=42):
+    def generate_image(self, params: GenerationParams, progress_callback=None) -> Image.Image:
+        """Generate image using orchestrated workflow"""
         if not self.model_loaded:
             raise Exception("Model not loaded. Please load the model first.")
         
-        positive_magic = {
-            "en": "Ultra HD, 4K, cinematic composition.",
-            "zh": "超清，4K，电影级构图"
-        }
+        # Create progress callback for pipeline
+        def step_callback(pipe, step_index, timestep, callback_kwargs):
+            if progress_callback:
+                progress_data = create_progress_display_data(step_index + 1, params.num_inference_steps)
+                progress_callback(progress_data)
+            return callback_kwargs
         
-        # Create generator with correct device
-        generator = torch.Generator(device=self.device).manual_seed(seed)
+        # Generate image with enhanced prompt
+        enhanced_prompt = enhance_prompt(params.prompt)
+        torch_generator = ModelLoader.create_generator(self.device, params.seed)
         
-        image = self.pipe(
-            prompt=prompt + " " + positive_magic["en"],
-            negative_prompt=negative_prompt,
-            width=width,
-            height=height,
-            num_inference_steps=num_inference_steps,
-            true_cfg_scale=cfg_scale,
-            generator=generator
-        ).images[0]
+        try:
+            image = self.pipe(
+                prompt=enhanced_prompt,
+                negative_prompt=params.negative_prompt,
+                width=params.width,
+                height=params.height,
+                num_inference_steps=params.num_inference_steps,
+                true_cfg_scale=params.cfg_scale,
+                generator=torch_generator,
+                callback_on_step_end=step_callback if progress_callback else None,
+                callback_on_step_end_tensor_inputs=["latents"] if progress_callback else None
+            ).images[0]
+        except TypeError as e:
+            print(f"Callback parameters not supported: {e}")
+            # Fallback without callback if not supported
+            image = self.pipe(
+                prompt=enhanced_prompt,
+                negative_prompt=params.negative_prompt,
+                width=params.width,
+                height=params.height,
+                num_inference_steps=params.num_inference_steps,
+                true_cfg_scale=params.cfg_scale,
+                generator=torch_generator
+            ).images[0]
         
         return image
 
@@ -149,6 +376,31 @@ def main(page: ft.Page):
     # Status and progress
     status_text = ft.Text("Ready to generate images", size=14)
     
+    # Progress components
+    progress_bar = ft.ProgressBar(
+        width=400,
+        color=ft.Colors.BLUE_400,
+        bgcolor=ft.Colors.GREY_300,
+        value=0,
+        visible=False
+    )
+    
+    progress_text = ft.Text(
+        "Step 0 / 0", 
+        size=12,
+        visible=False
+    )
+    
+    # Preview image container for intermediate steps
+    preview_container = ft.Container(
+        content=ft.Text("Generation preview will appear here", text_align=ft.TextAlign.CENTER),
+        border=ft.border.all(1, ft.Colors.GREY_300),
+        alignment=ft.alignment.center,
+        border_radius=8,
+        height=200,
+        visible=False
+    )
+    
     # Image display - scrollable container for original size images
     image_container = ft.Container(
         content=ft.Text("Generated image will appear here", text_align=ft.TextAlign.CENTER),
@@ -209,7 +461,14 @@ def main(page: ft.Page):
                 save_btn
             ]),
             
-            status_text
+            status_text,
+            
+            # Progress display section
+            ft.Divider(height=20),
+            progress_title := ft.Text("Generation Progress", size=14, weight=ft.FontWeight.BOLD, visible=False),
+            progress_text,
+            progress_bar,
+            preview_container
         ]),
         width=450,  # Made wider to accommodate all UI items
         padding=20,
@@ -267,25 +526,54 @@ def main(page: ft.Page):
             print("Generate button clicked - starting thread")
             generate_btn.disabled = True
             save_btn.disabled = True
+            
+            # Show progress components
+            progress_bar.visible = True
+            progress_text.visible = True
+            preview_container.visible = True
+            progress_title.visible = True
             page.update()
             
             update_status("Generating image...")
             print("Status updated to 'Generating image...'")
             
-            width, height = aspect_ratios[aspect_dropdown.value]
-            seed = int(seed_field.value) if seed_field.value.isdigit() else 42
+            width, height = aspect_ratios[aspect_dropdown.value or "16:9 (Widescreen)"]
+            seed = int(seed_field.value) if seed_field.value and seed_field.value.isdigit() else 42
             total_steps = int(steps_slider.value)
             print(f"Parameters: {width}x{height}, steps={total_steps}, seed={seed}")
             
+            # Progress callback function
+            def on_progress(current_step, total_steps, preview_image):
+                print(f"UI Progress callback: {current_step}/{total_steps}")
+                
+                # Update progress bar
+                progress_bar.value = current_step / total_steps
+                progress_text.value = f"Step {current_step} / {total_steps}"
+                
+                # Update preview container with progress message since Qwen doesn't support preview images
+                preview_container.content = ft.Column([
+                    ft.Icon(ft.Icons.HOURGLASS_EMPTY, size=40, color=ft.Colors.BLUE_400),
+                    ft.Text(f"Generating step {current_step}/{total_steps}", 
+                           text_align=ft.TextAlign.CENTER, size=12),
+                    ft.Text("Preview not available for Qwen model", 
+                           text_align=ft.TextAlign.CENTER, size=10, color=ft.Colors.GREY_600)
+                ], horizontal_alignment=ft.CrossAxisAlignment.CENTER)
+                
+                try:
+                    page.update()
+                    print("Page updated successfully")
+                except Exception as e:
+                    print(f"Error updating page: {e}")
             
             image = generator.generate_image(
-                prompt=prompt_field.value,
-                negative_prompt=negative_prompt_field.value,
+                prompt=prompt_field.value or "",
+                negative_prompt=negative_prompt_field.value or "",
                 width=width,
                 height=height,
                 num_inference_steps=total_steps,
                 cfg_scale=cfg_slider.value,
-                seed=seed
+                seed=seed,
+                progress_callback=on_progress
             )
             
             current_image = image
@@ -295,21 +583,27 @@ def main(page: ft.Page):
             image.save(img_buffer, format='PNG')
             img_base64 = base64.b64encode(img_buffer.getvalue()).decode()
             
-            # Create scrollable container with original size image
-            scroll_view = ft.ListView(
-                controls=[
-                    ft.Image(
-                        src_base64=img_base64,
-                        width=image.width,
-                        height=image.height,
-                        fit=ft.ImageFit.NONE
-                    )
-                ],
+            # Create contained image display that fits within the UI
+            image_display = ft.Container(
+                content=ft.Image(
+                    src_base64=img_base64,
+                    fit=ft.ImageFit.CONTAIN,  # Fit image within container while maintaining aspect ratio
+                    expand=True
+                ),
                 expand=True,
-                auto_scroll=False
+                alignment=ft.alignment.center,
+                bgcolor=ft.Colors.BLACK12,
+                border_radius=8,
+                clip_behavior=ft.ClipBehavior.HARD_EDGE
             )
             
-            image_container.content = scroll_view
+            image_container.content = image_display
+            
+            # Hide progress components after completion
+            progress_bar.visible = False
+            progress_text.visible = False
+            preview_container.visible = False
+            progress_title.visible = False
             
             generate_btn.disabled = False
             save_btn.disabled = False
@@ -318,6 +612,12 @@ def main(page: ft.Page):
         except Exception as e:
             update_status(f"Error generating image: {str(e)}")
             generate_btn.disabled = False
+            
+            # Hide progress components on error too
+            progress_bar.visible = False
+            progress_text.visible = False
+            preview_container.visible = False
+            progress_title.visible = False
         
         page.update()
     
