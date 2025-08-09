@@ -20,6 +20,7 @@ MODEL_NAME = "Qwen/Qwen-Image"
 class GenerationParams:
     prompt: str
     negative_prompt: str
+    enhancement: str
     width: int
     height: int
     num_inference_steps: int
@@ -57,6 +58,7 @@ def validate_generation_params(params: Dict[str, Any]) -> GenerationParams:
     return GenerationParams(
         prompt=params.get("prompt", ""),
         negative_prompt=params.get("negative_prompt", ""),
+        enhancement=params.get("enhancement", "Ultra HD, 4K, cinematic composition."),
         width=width,
         height=height,
         num_inference_steps=int(params.get("steps", 50)),
@@ -64,10 +66,11 @@ def validate_generation_params(params: Dict[str, Any]) -> GenerationParams:
         seed=seed
     )
 
-def enhance_prompt(prompt: str) -> str:
+def enhance_prompt(prompt: str, enhancement: str = "Ultra HD, 4K, cinematic composition.") -> str:
     """Pure function to enhance prompt with quality modifiers"""
-    positive_magic = "Ultra HD, 4K, cinematic composition."
-    return f"{prompt} {positive_magic}"
+    if enhancement.strip():
+        return f"{prompt} {enhancement}"
+    return prompt
 
 def calculate_progress(current_step: int, total_steps: int) -> float:
     """Pure function to calculate progress percentage"""
@@ -161,11 +164,11 @@ class UIUpdater:
         self.page.update()
     
     def update_image_display(self, image_base64: str, image_container) -> None:
-        """Update image display with new image"""
+        """Update image display with new image - scaled to fit window but maintaining proportions"""
         image_display = ft.Container(
             content=ft.Image(
                 src_base64=image_base64,
-                fit=ft.ImageFit.CONTAIN,
+                fit=ft.ImageFit.CONTAIN,  # Maintains aspect ratio, scales to fit
                 expand=True
             ),
             expand=True,
@@ -200,7 +203,7 @@ class ImageGenerationOrchestrator:
             return callback_kwargs
         
         # Generate image with enhanced prompt
-        enhanced_prompt = enhance_prompt(params.prompt)
+        enhanced_prompt = enhance_prompt(params.prompt, params.enhancement)
         torch_generator = ModelLoader.create_generator(generator.device, params.seed)
         
         image = generator.pipe(
@@ -268,7 +271,7 @@ class QwenImageGenerator:
             return callback_kwargs
         
         # Generate image with enhanced prompt
-        enhanced_prompt = enhance_prompt(params.prompt)
+        enhanced_prompt = enhance_prompt(params.prompt, params.enhancement)
         torch_generator = ModelLoader.create_generator(self.device, params.seed)
         
         try:
@@ -309,16 +312,17 @@ def main(page: ft.Page):
     ui_updater = UIUpdater(page)
     orchestrator = ImageGenerationOrchestrator(ui_updater)
     
-    # State for collapsible left panel
-    left_panel_collapsed = False
+    # State for collapsible configuration section
+    config_collapsed = False
     
     # UI Components
     prompt_field = ft.TextField(
         label="Prompt",
         multiline=True,
-        min_lines=3,
-        max_lines=5,
-        value="A beautiful lake in a forest grove in the Alps. Snow capped mountains in the backround. Mossy ground with mushrooms. Little dwarfs frolicking in the moss"
+        min_lines=2,
+        max_lines=3,
+        value="A beautiful lake in a forest grove in the Alps. Snow capped mountains in the backround. Mossy ground with mushrooms. Little dwarfs frolicking in the moss",
+        expand=True
     )
     
     negative_prompt_field = ft.TextField(
@@ -327,6 +331,12 @@ def main(page: ft.Page):
         min_lines=2,
         max_lines=3,
         value="",
+        expand=True
+    )
+    
+    enhancement_field = ft.TextField(
+        label="Enhancement",
+        value="Ultra HD, 4K, cinematic composition.",
         expand=True
     )
     
@@ -404,13 +414,14 @@ def main(page: ft.Page):
         visible=False
     )
     
-    # Image display - scrollable container for original size images
+    # Image display - properly sized container that maintains aspect ratio
     image_container = ft.Container(
-        content=ft.Text("Generated image will appear here", text_align=ft.TextAlign.CENTER),
+        content=ft.Text("Generated image will appear here", text_align=ft.TextAlign.CENTER, size=16, color=ft.Colors.GREY_600),
         border=ft.border.all(1, ft.Colors.GREY_400),
         alignment=ft.alignment.center,
         border_radius=8,
-        expand=True
+        expand=True,
+        bgcolor=ft.Colors.GREY_50
     )
     
     
@@ -436,68 +447,89 @@ def main(page: ft.Page):
     )
     
     
-    # Left panel container that will be toggled
-    left_panel_container = ft.Container(
+    # Configuration section that can be collapsed
+    config_container = ft.Container(
         content=ft.Column([
-            ft.Text("Generation Parameters", size=18, weight=ft.FontWeight.BOLD),
-            prompt_field,
-            negative_prompt_field,
+            # First row: Prompt and Negative Prompt side by side
+            ft.Row([
+                ft.Container(content=prompt_field, expand=True),
+                ft.Container(content=negative_prompt_field, expand=True)
+            ], spacing=10),
             
+            # Enhancement field (full width)
+            enhancement_field,
+            
+            # Second row: Generation parameters
             ft.Row([
                 aspect_dropdown,
-                ft.Column([
-                    ft.Text("Inference Steps"),
-                    steps_slider
-                ]),
-                ft.Column([
-                    ft.Text("CFG Scale"),
-                    cfg_slider
-                ])
-            ]),
+                ft.Container(
+                    content=ft.Column([
+                        ft.Text("Inference Steps", size=12),
+                        steps_slider
+                    ]),
+                    width=200
+                ),
+                ft.Container(
+                    content=ft.Column([
+                        ft.Text("CFG Scale", size=12),
+                        cfg_slider
+                    ]),
+                    width=200
+                ),
+                ft.Row([
+                    seed_field,
+                    random_seed_btn
+                ], spacing=5)
+            ], spacing=20, alignment=ft.MainAxisAlignment.START),
             
+            # Third row: Control buttons
             ft.Row([
-                seed_field,
-                random_seed_btn,
                 load_model_btn,
                 generate_btn,
                 save_btn
-            ]),
+            ], spacing=10),
             
-            status_text,
-            
-            # Progress display section
-            ft.Divider(height=20),
-            progress_title := ft.Text("Generation Progress", size=14, weight=ft.FontWeight.BOLD, visible=False),
-            progress_text,
-            progress_bar,
-            preview_container
-        ]),
-        width=450,  # Made wider to accommodate all UI items
+            # Status
+            status_text
+        ], spacing=15),
         padding=20,
+        bgcolor=ft.Colors.BLUE_GREY_50,
+        border_radius=8,
+        border=ft.border.all(1, ft.Colors.BLUE_GREY_200),
         visible=True
     )
     
-    # Toggle button for collapsing/expanding the left panel
-    def toggle_left_panel(_):
-        nonlocal left_panel_collapsed
-        left_panel_collapsed = not left_panel_collapsed
-        left_panel_container.visible = not left_panel_collapsed
+    # Toggle button for collapsing/expanding the configuration section
+    def toggle_config_section(_):
+        nonlocal config_collapsed
+        config_collapsed = not config_collapsed
+        config_container.visible = not config_collapsed
         
         # Update button icon
-        if left_panel_collapsed:
-            toggle_btn.icon = ft.Icons.MENU_OPEN
-            toggle_btn.tooltip = "Show panel"
+        if config_collapsed:
+            toggle_btn.icon = ft.Icons.EXPAND_MORE
+            toggle_btn.tooltip = "Show configuration"
         else:
-            toggle_btn.icon = ft.Icons.MENU
-            toggle_btn.tooltip = "Hide panel"
+            toggle_btn.icon = ft.Icons.EXPAND_LESS
+            toggle_btn.tooltip = "Hide configuration"
         
         page.update()
     
+    # Function to auto-collapse after generation
+    def auto_collapse_after_generation():
+        nonlocal config_collapsed
+        if not config_collapsed:
+            config_collapsed = True
+            config_container.visible = False
+            toggle_btn.icon = ft.Icons.EXPAND_MORE
+            toggle_btn.tooltip = "Show configuration"
+            page.update()
+    
     toggle_btn = ft.IconButton(
-        icon=ft.Icons.MENU,
-        tooltip="Hide panel",
-        on_click=toggle_left_panel,
-        icon_size=20
+        icon=ft.Icons.EXPAND_LESS,
+        tooltip="Hide configuration",
+        on_click=toggle_config_section,
+        icon_size=24
     )
     
     
@@ -532,8 +564,7 @@ def main(page: ft.Page):
             progress_components = {
                 "bar": progress_bar,
                 "text": progress_text, 
-                "preview": preview_container,
-                "title": progress_title
+                "preview": preview_container
             }
             ui_updater.show_progress_components(progress_components)
             ui_updater.update_status("Generating image...", status_text)
@@ -542,6 +573,7 @@ def main(page: ft.Page):
             ui_params = {
                 "prompt": prompt_field.value,
                 "negative_prompt": negative_prompt_field.value,
+                "enhancement": enhancement_field.value,
                 "aspect_ratio": aspect_dropdown.value,
                 "seed": seed_field.value,
                 "steps": steps_slider.value,
@@ -568,6 +600,9 @@ def main(page: ft.Page):
             save_btn.disabled = False
             ui_updater.update_status("Image generated successfully!", status_text)
             
+            # Auto-collapse configuration section after successful generation
+            auto_collapse_after_generation()
+            
         except Exception as e:
             ui_updater.update_status(f"Error generating image: {str(e)}", status_text)
             generate_btn.disabled = False
@@ -589,31 +624,42 @@ def main(page: ft.Page):
     generate_btn.on_click = on_generate_click
     save_btn.on_click = save_image
     
-    # Layout
+    # New vertical layout
     page.add(
         ft.Container(
             content=ft.Column([
-                # Header with toggle button
+                # Header with toggle button and title
                 ft.Row([
                     toggle_btn,
                     ft.Text("Qwen Image Generator", size=24, weight=ft.FontWeight.BOLD),
                 ], alignment=ft.MainAxisAlignment.START, vertical_alignment=ft.CrossAxisAlignment.CENTER),
                 
-                # Main content row
-                ft.Row([
-                    left_panel_container,
-                    
-                    ft.Container(
-                        content=ft.Column([
-                            ft.Text("Generated Image", size=18, weight=ft.FontWeight.BOLD),
-                            image_container
-                        ]),
-                        expand=True,
-                        padding=20
-                    )
-                ], expand=True)
-            ]),
-            padding=20
+                # Collapsible configuration section
+                config_container,
+                
+                # Progress section (always visible when active)
+                ft.Container(
+                    content=ft.Column([
+                        ft.Text("Generation Progress", size=14, weight=ft.FontWeight.BOLD, visible=False),
+                        progress_text,
+                        progress_bar,
+                        preview_container
+                    ], spacing=5),
+                    padding=ft.padding.symmetric(horizontal=20, vertical=10)
+                ),
+                
+                # Image display section (takes remaining space)
+                ft.Container(
+                    content=ft.Column([
+                        ft.Text("Generated Image", size=18, weight=ft.FontWeight.BOLD),
+                        image_container
+                    ], spacing=10),
+                    expand=True,
+                    padding=20
+                )
+            ], spacing=10),
+            padding=20,
+            expand=True
         )
     )
 
