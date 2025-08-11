@@ -1,9 +1,14 @@
 import flet as ft
 from diffusers import DiffusionPipeline
+try:
+    from diffusers.pipelines.qwen_image import QwenImagePipeline
+except ImportError:
+    # Fallback if the import path is different
+    QwenImagePipeline = None
 import torch
 import io
 import base64
-from PIL import Image
+from PIL import Image, ImageFilter
 import threading
 import os
 from typing import Dict, Tuple, Optional, Any
@@ -34,7 +39,11 @@ class ModelConfig:
     model_loaded: bool
 
 def get_optimal_device() -> Tuple[str, torch.dtype]:
-    """Pure function to determine optimal device and dtype"""
+    """Detects the best available compute device and appropriate data type.
+    
+    Returns MPS for Apple Silicon, CUDA for NVIDIA GPUs, or CPU as fallback.
+    Uses bfloat16 for accelerated devices to save memory and improve performance.
+    """
     if torch.backends.mps.is_available():
         return "mps", torch.bfloat16
     elif torch.cuda.is_available():
@@ -43,7 +52,11 @@ def get_optimal_device() -> Tuple[str, torch.dtype]:
         return "cpu", torch.float32
 
 def validate_generation_params(params: Dict[str, Any]) -> GenerationParams:
-    """Pure function to validate and create generation parameters"""
+    """Validates UI input and converts to structured generation parameters.
+    
+    Handles aspect ratio lookup, seed validation, and parameter type conversion.
+    Invalid seeds default to 42 to ensure reproducible generation.
+    """
     aspect_ratios = {
         "1:1 (Square)": (1328, 1328),
         "16:9 (Widescreen)": (1664, 928),
@@ -67,32 +80,48 @@ def validate_generation_params(params: Dict[str, Any]) -> GenerationParams:
     )
 
 def enhance_prompt(prompt: str, enhancement: str = "Ultra HD, 4K, cinematic composition.") -> str:
-    """Pure function to enhance prompt with quality modifiers"""
+    """Appends quality enhancement text to the user's prompt.
+    
+    Quality modifiers like 'Ultra HD, 4K' help guide the model toward
+    higher quality outputs. Empty enhancements are ignored.
+    """
     if enhancement.strip():
         return f"{prompt} {enhancement}"
     return prompt
 
 def calculate_progress(current_step: int, total_steps: int) -> float:
-    """Pure function to calculate progress percentage"""
+    """Calculates completion percentage for progress bars (0.0 to 1.0)."""
     return current_step / total_steps
 
 def create_progress_message(current_step: int, total_steps: int) -> str:
-    """Pure function to create progress text"""
+    """Formats progress text for display during generation."""
     return f"Step {current_step} / {total_steps}"
 
 def generate_filename() -> str:
-    """Pure function to generate timestamped filename"""
+    """Creates unique timestamped filename for saved images.
+    
+    Format: qwen_generated_YYYYMMDD_HHMMSS.png
+    Prevents filename conflicts when saving multiple images.
+    """
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     return f"qwen_generated_{timestamp}.png"
 
 def convert_image_to_base64(image: Image.Image) -> str:
-    """Pure function to convert PIL image to base64 string"""
+    """Encodes PIL Image as base64 string for Flet display.
+    
+    Flet UI requires base64-encoded images for src_base64 parameter.
+    Always uses PNG format to preserve quality.
+    """
     img_buffer = io.BytesIO()
     image.save(img_buffer, format='PNG')
     return base64.b64encode(img_buffer.getvalue()).decode()
 
 def create_progress_display_data(current_step: int, total_steps: int) -> Dict[str, Any]:
-    """Pure function to create progress display data"""
+    """Builds progress display data structure for UI updates.
+    
+    Returns dictionary with progress value, text, and UI elements.
+    Qwen model doesn't support intermediate previews during generation.
+    """
     return {
         "progress_value": calculate_progress(current_step, total_steps),
         "progress_text": create_progress_message(current_step, total_steps),
@@ -106,40 +135,74 @@ def create_progress_display_data(current_step: int, total_steps: int) -> Dict[st
 # =============================================================================
 
 class ModelLoader:
-    """Handles model loading side effects"""
+    """Handles diffusion model loading and device configuration."""
     
     @staticmethod
     def load_diffusion_pipeline(model_name: str, config: ModelConfig) -> DiffusionPipeline:
-        """Load and configure the diffusion pipeline"""
+        """Loads the Qwen diffusion pipeline with fallback handling.
+        
+        Attempts to load QwenImagePipeline first for future image editing support,
+        falls back to generic DiffusionPipeline if specific pipeline unavailable.
+        Automatically moves model to specified device (MPS/CUDA/CPU).
+        """
+        # Try to load as QwenImagePipeline first for image editing support
+        if QwenImagePipeline is not None:
+            try:
+                pipe = QwenImagePipeline.from_pretrained(model_name, torch_dtype=config.torch_dtype)
+                print("Loaded as QwenImagePipeline - image editing supported")
+                return pipe.to(config.device)
+            except Exception as e:
+                print(f"Failed to load as QwenImagePipeline: {e}")
+        
+        # Fallback to generic DiffusionPipeline
         pipe = DiffusionPipeline.from_pretrained(model_name, torch_dtype=config.torch_dtype)
+        print(f"Loaded as {type(pipe).__name__}")
         return pipe.to(config.device)
     
     @staticmethod
     def create_generator(device: str, seed: int) -> torch.Generator:
-        """Create torch generator with seed"""
+        """Creates a seeded random number generator for reproducible generation.
+        
+        Generator must match the model's device (MPS/CUDA/CPU) to avoid errors.
+        Same seed produces identical results for debugging and consistency.
+        """
         return torch.Generator(device=device).manual_seed(seed)
 
 class ImageSaver:
-    """Handles image saving side effects"""
+    """Handles saving generated images to disk."""
     
     @staticmethod
     def save_image(image: Image.Image, filename: str) -> None:
-        """Save PIL image to file"""
+        """Saves PIL Image to filesystem with automatic format detection.
+        
+        Format determined by file extension. PNG recommended for quality preservation.
+        """
         image.save(filename)
 
 class UIUpdater:
-    """Handles UI update side effects"""
+    """Manages UI updates and page refreshes in a centralized way.
     
-    def __init__(self, page: ft.Page):
+    Provides consistent interface for updating status, progress, and images
+    while ensuring proper page.update() calls for Flet refresh.
+    """
+    
+    def __init__(self, page: ft.Page) -> None:
         self.page = page
     
-    def update_status(self, message: str, status_component) -> None:
-        """Update status text and refresh UI"""
+    def update_status(self, message: str, status_component: ft.Text) -> None:
+        """Updates status text component and refreshes the UI.
+        
+        Use for user feedback during loading, errors, and completion states.
+        """
         status_component.value = message
         self.page.update()
     
-    def update_progress(self, progress_data: Dict[str, Any], progress_components: Dict[str, Any]) -> None:
-        """Update progress components and refresh UI"""
+    def update_progress(self, progress_data: Dict[str, Any], progress_components: Dict[str, ft.Control]) -> None:
+        """Updates progress bar, text, and preview components during generation.
+        
+        progress_data should contain progress_value, progress_text, icon, message, sub_message.
+        progress_components should contain 'bar', 'text', and 'preview' controls.
+        """
         progress_components["bar"].value = progress_data["progress_value"]
         progress_components["text"].value = progress_data["progress_text"]
         
@@ -151,20 +214,24 @@ class UIUpdater:
         
         self.page.update()
     
-    def show_progress_components(self, components: Dict[str, Any]) -> None:
-        """Show progress components"""
+    def show_progress_components(self, components: Dict[str, ft.Control]) -> None:
+        """Makes progress components visible during generation."""
         for comp in components.values():
             comp.visible = True
         self.page.update()
     
-    def hide_progress_components(self, components: Dict[str, Any]) -> None:
-        """Hide progress components"""
+    def hide_progress_components(self, components: Dict[str, ft.Control]) -> None:
+        """Hides progress components after generation completes."""
         for comp in components.values():
             comp.visible = False
         self.page.update()
     
-    def update_image_display(self, image_base64: str, image_container) -> None:
-        """Update image display with new image - scaled to fit window but maintaining proportions"""
+    def update_image_display(self, image_base64: str, image_container: ft.Container) -> None:
+        """Displays generated image with responsive scaling and aspect ratio preservation.
+        
+        Creates a new container with the image, replacing any previous content.
+        Uses CONTAIN fit to prevent distortion while filling available space.
+        """
         image_display = ft.Container(
             content=ft.Image(
                 src_base64=image_base64,
@@ -185,18 +252,26 @@ class UIUpdater:
 # =============================================================================
 
 class ImageGenerationOrchestrator:
-    """Orchestrates the image generation process"""
+    """Coordinates image generation workflow with UI updates.
     
-    def __init__(self, ui_updater: UIUpdater):
+    Manages the complete generation process from parameter validation
+    through progress tracking to final image storage.
+    """
+    
+    def __init__(self, ui_updater: UIUpdater) -> None:
         self.ui_updater = ui_updater
-        self.current_image = None
+        self.current_image: Optional[Image.Image] = None
     
-    def generate_image_workflow(self, generator, params: GenerationParams, 
-                               progress_callback=None) -> Image.Image:
-        """Orchestrate the complete image generation workflow"""
+    def generate_image_workflow(self, generator: 'QwenImageGenerator', params: GenerationParams, 
+                               progress_callback: Optional[callable] = None) -> Image.Image:
+        """Executes complete image generation workflow with progress tracking.
+        
+        Handles prompt enhancement, generator setup, pipeline execution,
+        and progress reporting through callback system.
+        """
         
         # Create progress callback for pipeline
-        def step_callback(pipe, step_index, timestep, callback_kwargs):
+        def step_callback(pipe: Any, step_index: int, timestep: Any, callback_kwargs: Dict[str, Any]) -> Dict[str, Any]:
             if progress_callback:
                 progress_data = create_progress_display_data(step_index + 1, params.num_inference_steps)
                 progress_callback(progress_data)
@@ -222,7 +297,11 @@ class ImageGenerationOrchestrator:
         return image
     
     def save_current_image(self) -> Optional[str]:
-        """Save the current image and return filename"""
+        """Saves the most recently generated image with timestamp filename.
+        
+        Returns the filename if successful, None if no image to save.
+        Creates unique filenames to prevent overwrites.
+        """
         if self.current_image:
             filename = generate_filename()
             ImageSaver.save_image(self.current_image, filename)
@@ -230,16 +309,27 @@ class ImageGenerationOrchestrator:
         return None
 
 class QwenImageGenerator:
-    """Simplified generator class using new architecture"""
+    """Main interface for Qwen image generation model.
     
-    def __init__(self):
-        self.pipe = None
-        self.device = None
-        self.torch_dtype = None
-        self.model_loaded = False
+    Handles model loading, device management, and image generation.
+    Currently supports text-to-image only; image editing coming in future updates.
+    """
+    
+    def __init__(self) -> None:
+        self.pipe: Optional[DiffusionPipeline] = None
+        self.device: Optional[str] = None
+        self.torch_dtype: Optional[torch.dtype] = None
+        self.model_loaded: bool = False
         
-    def load_model(self, progress_callback=None):
-        """Load the model using pure functions and side effects separation"""
+    def load_model(self, progress_callback: Optional[callable] = None) -> None:
+        """Downloads and initializes the Qwen diffusion model.
+        
+        Automatically detects best available device (MPS/CUDA/CPU) and configures
+        appropriate data types for optimal performance. Only loads once.
+        
+        Args:
+            progress_callback: Optional function to receive status updates during loading
+        """
         if self.model_loaded:
             return
             
@@ -258,13 +348,24 @@ class QwenImageGenerator:
         if progress_callback:
             progress_callback("Model loaded successfully!")
     
-    def generate_image(self, params: GenerationParams, progress_callback=None) -> Image.Image:
-        """Generate image using orchestrated workflow"""
+    def generate_image(self, params: GenerationParams, progress_callback: Optional[callable] = None) -> Image.Image:
+        """Generates image from text prompt using loaded Qwen model.
+        
+        Args:
+            params: Validated generation parameters including prompt, dimensions, steps, etc.
+            progress_callback: Optional function to receive progress updates during generation
+            
+        Returns:
+            Generated PIL Image
+            
+        Raises:
+            Exception: If model not loaded or generation fails
+        """
         if not self.model_loaded:
             raise Exception("Model not loaded. Please load the model first.")
         
         # Create progress callback for pipeline
-        def step_callback(pipe, step_index, timestep, callback_kwargs):
+        def step_callback(pipe: Any, step_index: int, timestep: Any, callback_kwargs: Dict[str, Any]) -> Dict[str, Any]:
             if progress_callback:
                 progress_data = create_progress_display_data(step_index + 1, params.num_inference_steps)
                 progress_callback(progress_data)
@@ -275,6 +376,7 @@ class QwenImageGenerator:
         torch_generator = ModelLoader.create_generator(self.device, params.seed)
         
         try:
+            # Qwen-Image currently only supports text-to-image generation
             image = self.pipe(
                 prompt=enhanced_prompt,
                 negative_prompt=params.negative_prompt,
@@ -301,7 +403,16 @@ class QwenImageGenerator:
         
         return image
 
-def main(page: ft.Page):
+def main(page: ft.Page) -> None:
+    """Main Flet application entry point.
+    
+    Sets up the complete UI including model controls, parameter inputs,
+    progress tracking, and image display. Handles all user interactions
+    and coordinates between UI and generation logic.
+    
+    Args:
+        page: Flet page object for UI rendering
+    """
     page.title = f"Image Generator (using model {MODEL_NAME})"
     page.theme_mode = ft.ThemeMode.LIGHT
     page.window_width = 1200
@@ -386,6 +497,34 @@ def main(page: ft.Page):
         width=80
     )
     
+    # Message container for image editing feedback
+    image_edit_message = ft.Container(
+        content=ft.Text(
+            "Image editing mode: Your input image will guide the generation", 
+            size=12, 
+            color=ft.Colors.GREEN_700
+        ),
+        visible=False,
+        padding=10,
+        bgcolor=ft.Colors.GREEN_50,
+        border_radius=5
+    )
+    
+    
+    # Test button to check if click events work
+    def test_button_click(_: ft.ControlEvent) -> None:
+        """Test function to verify UI interactions are working."""
+        ui_updater.update_status("Button click detected!", status_text)
+        print("Button clicked successfully")
+    
+    # Add a test button to verify click functionality
+    test_btn = ft.ElevatedButton(
+        "Test Click",
+        icon=ft.Icons.BUG_REPORT,
+        on_click=test_button_click,
+        width=100
+    )
+    
     # Status and progress
     status_text = ft.Text("Ready to generate images", size=14)
     
@@ -459,6 +598,24 @@ def main(page: ft.Page):
             # Enhancement field (full width)
             enhancement_field,
             
+            # Information about upcoming features
+            ft.Container(
+                content=ft.Column([
+                    ft.Text("ℹ️ Image Editing Coming Soon", size=14, weight=ft.FontWeight.BOLD, color=ft.Colors.BLUE_700),
+                    ft.Text(
+                        "Qwen-Image currently supports text-to-image generation only. " +
+                        "Image editing capabilities will be added in a future release.",
+                        size=12,
+                        color=ft.Colors.GREY_700
+                    ),
+                    ft.Row([test_btn], spacing=10)
+                ], spacing=10),
+                bgcolor=ft.Colors.BLUE_50,
+                padding=15,
+                border_radius=8,
+                border=ft.border.all(1, ft.Colors.BLUE_200)
+            ),
+            
             # Second row: Generation parameters
             ft.Row([
                 aspect_dropdown,
@@ -500,7 +657,11 @@ def main(page: ft.Page):
     )
     
     # Toggle button for collapsing/expanding the configuration section
-    def toggle_config_section(_):
+    def toggle_config_section(_: ft.ControlEvent) -> None:
+        """Toggles visibility of configuration panel to save screen space.
+        
+        Updates button icon and tooltip text to reflect current state.
+        """
         nonlocal config_collapsed
         config_collapsed = not config_collapsed
         config_container.visible = not config_collapsed
@@ -516,7 +677,11 @@ def main(page: ft.Page):
         page.update()
     
     # Function to auto-collapse after generation
-    def auto_collapse_after_generation():
+    def auto_collapse_after_generation() -> None:
+        """Automatically hides configuration panel after successful generation.
+        
+        Provides more space for viewing the generated image.
+        """
         nonlocal config_collapsed
         if not config_collapsed:
             config_collapsed = True
@@ -533,12 +698,17 @@ def main(page: ft.Page):
     )
     
     
-    def load_model_thread():
+    def load_model_thread() -> None:
+        """Background thread for model loading to prevent UI blocking.
+        
+        Disables load button during process, updates UI with progress,
+        enables generate button on success, shows error on failure.
+        """
         try:
             load_model_btn.disabled = True
             page.update()
             
-            def progress_callback(message):
+            def progress_callback(message: str) -> None:
                 ui_updater.update_status(message, status_text)
             
             generator.load_model(progress_callback=progress_callback)
@@ -554,7 +724,12 @@ def main(page: ft.Page):
         
         page.update()
     
-    def generate_image_thread():
+    def generate_image_thread() -> None:
+        """Background thread for image generation to prevent UI blocking.
+        
+        Manages complete generation workflow including progress display,
+        error handling, and UI state management. Auto-collapses config on success.
+        """
         try:
             print("Generate button clicked - starting thread")
             generate_btn.disabled = True
@@ -582,8 +757,8 @@ def main(page: ft.Page):
             params = validate_generation_params(ui_params)
             print(f"Parameters: {params.width}x{params.height}, steps={params.num_inference_steps}, seed={params.seed}")
             
-            # Progress callback function using pure functions
-            def on_progress(progress_data):
+            # Progress callback function for UI updates during generation
+            def on_progress(progress_data: Dict[str, Any]) -> None:
                 ui_updater.update_progress(progress_data, progress_components)
             
             # Generate image using orchestrator
@@ -606,17 +781,25 @@ def main(page: ft.Page):
         except Exception as e:
             ui_updater.update_status(f"Error generating image: {str(e)}", status_text)
             generate_btn.disabled = False
+            # Re-define progress_components for error handling
+            progress_components = {
+                "bar": progress_bar,
+                "text": progress_text, 
+                "preview": preview_container
+            }
             ui_updater.hide_progress_components(progress_components)
             page.update()
     
-    def save_image(_):
+    def save_image(_: ft.ControlEvent) -> None:
+        """Saves the currently displayed image with timestamp filename."""
         filename = orchestrator.save_current_image()
         if filename:
             ui_updater.update_status(f"Image saved as {filename}", status_text)
         else:
             ui_updater.update_status("No image to save", status_text)
     
-    def on_generate_click(_):
+    def on_generate_click(_: ft.ControlEvent) -> None:
+        """Starts image generation in background thread."""
         print("Generate button clicked!")
         threading.Thread(target=generate_image_thread, daemon=True).start()
     
