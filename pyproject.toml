@@ -1,12 +1,61 @@
 [project]
 name = "flet-imagecreator"
 version = "0.1.0"
-description = "Add your description here"
+description = "A Flet-based GUI application for AI image generation using the Qwen diffusion model"
 readme = "README.md"
 requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "Flet Image Creator Contributors" }]
+keywords = ["ai", "image-generation", "diffusion", "qwen", "flet", "gui"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: X11 Applications",
+    "Intended Audience :: Developers",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Graphics",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
 dependencies = [
     "accelerate>=1.9.0",
     "flet[all]>=0.28.3",
     "torch>=2.7.1",
     "transformers>=4.54.1",
 ]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "mypy>=1.8.0",
+    "ruff>=0.3.0",
+]
+
+[project.scripts]
+flet-imagecreator = "main:run"
+
+[project.urls]
+Homepage = "https://github.com/hherb/flet_imagecreator"
+Documentation = "https://github.com/hherb/flet_imagecreator/tree/main/docs"
+Repository = "https://github.com/hherb/flet_imagecreator"
+Issues = "https://github.com/hherb/flet_imagecreator/issues"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "D", "UP", "B", "C4", "SIM"]
+ignore = ["D100", "D104"]  # Allow missing module/package docstrings
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
